@@ -31,8 +31,6 @@ struct RegisterSet {
     }
 }
 
-var reg = RegisterSet()
-
 enum OpCode: UInt16 {
     case br, add, ld, st, jsr, and, ldr, str, rti, not,
          ldi, sti, jmp, res, lea, trap
@@ -47,18 +45,41 @@ enum TrapCode: UInt16 {
     case halt  = 0x25 // halt the program
 }
 
+struct Instruction {
+    let code: UInt16
+    init(_ code: UInt16) {
+        self.code = code
+    }
+    
+    private static func sign_extend(_ x: UInt16, bit_count: UInt16) -> UInt16 {
+        if ((x >> (bit_count - 1)) & UInt16(1)) != 0 {
+            return x | (0xFFFF << bit_count)
+        } else {
+            return x
+        }
+    }
+    
+    var op: OpCode? { return OpCode(rawValue: code >> 12) }
+    
+    var trapCode: TrapCode? { return TrapCode(rawValue: code & 0xFF) }
+    
+    var r0: UInt16 { return (code >> 9) & 0x7 }
+    var r1: UInt16 { return (code >> 6) & 0x7 }
+    var imm_flag: Bool { return ((code >> 5) & 0x1) == 1 }
+    var imm5: UInt16 { return Instruction.sign_extend(code & 0x1F, bit_count: 5) }
+    var r2: UInt16 { return code & 0x7 }
+    var pc_offset: UInt16 { return Instruction.sign_extend(code & 0x1ff, bit_count: 9) }
+    var long_pc_offset: UInt16 { return Instruction.sign_extend(code & 0x7ff, bit_count: 11) }
+    var long_flag: Bool { return ((code >> 11) & 1) != 0 }
+    var offset: UInt16 { return Instruction.sign_extend(code & 0x3F, bit_count: 6) }
+}
+
+var reg = RegisterSet()
+
 extension UInt16 {
     static var pos: UInt16 { return (1 << 0) }
     static var zro: UInt16 { return (1 << 1) }
     static var neg: UInt16 { return (1 << 2) }
-}
-
-func sign_extend(_ x: UInt16, bit_count: UInt16) -> UInt16 {
-    if ((x >> (bit_count - 1)) & UInt16(1)) != 0 {
-        return x | (0xFFFF << bit_count)
-    } else {
-        return x
-    }
 }
 
 func update_flags(_ r: UInt16) {
@@ -145,8 +166,8 @@ func check_key() -> Bool {
 func run() {
     var running = true
     
-    func handleTrap(_ instr: UInt16) {
-        let trapCode = TrapCode.init(rawValue: instr & 0xFF)!
+    func handleTrap(_ instr: Instruction) {
+        let trapCode = instr.trapCode!
         
         switch trapCode {
         case .getc:
@@ -188,79 +209,69 @@ func run() {
     
     while running {
         /* FETCH */
-        let instr = mem_read(reg[.pc])
+        let instr = Instruction(mem_read(reg[.pc]))
         reg[.pc] += 1
-        guard let op = OpCode.init(rawValue: instr >> 12) else {
+        guard let op = instr.op else {
             fatalError("bad opcode")
         }
         
-        var r0: UInt16 { return (instr >> 9) & 0x7 }
-        var r1: UInt16 { return (instr >> 6) & 0x7 }
-        var imm_flag: Bool { return ((instr >> 5) & 0x1) == 1 }
-        var imm5: UInt16 { return sign_extend(instr & 0x1F, bit_count: 5) }
-        var r2: UInt16 { return instr & 0x7 }
-        var pc_offset: UInt16 { return sign_extend(instr & 0x1ff, bit_count: 9) }
-        var long_pc_offset: UInt16 { return sign_extend(instr & 0x7ff, bit_count: 11) }
-        var long_flag: Bool { return ((instr >> 11) & 1) != 0 }
-        var offset: UInt16 { return sign_extend(instr & 0x3F, bit_count: 6) }
-        
         switch op {
         case .add:
-            reg[r0] = reg[r1] &+ (imm_flag ? imm5 : reg[r2])
-            update_flags(r0)
+            reg[instr.r0] = reg[instr.r1] &+ (instr.imm_flag ? instr.imm5 : reg[instr.r2])
+            update_flags(instr.r0)
             
         case .and:
-            reg[r0] = reg[r1] & (imm_flag ? imm5 : reg[r2])
-            update_flags(r0)
+            reg[instr.r0] = reg[instr.r1] & (instr.imm_flag ? instr.imm5 : reg[instr.r2])
+            update_flags(instr.r0)
             
         case .not:
-            reg[r0] = ~reg[r1]
-            update_flags(r0)
+            reg[instr.r0] = ~reg[instr.r1]
+            update_flags(instr.r0)
         
         case .br:
-            let cond_flag = r0
+            let cond_flag = instr.r0
             if (cond_flag & reg[.cond]) != 0 {
-                reg[.pc] &+= pc_offset
+                reg[.pc] &+= instr.pc_offset
             }
         
         case .jmp:
-            reg[.pc] = reg[r1]
+            reg[.pc] = reg[instr.r1]
             
         case .jsr:
             reg[.r7] = reg[.pc]
-            if long_flag {
-                reg[.pc] &+= long_pc_offset // JSR
+            if instr.long_flag {
+                reg[.pc] &+= instr.long_pc_offset // JSR
             } else {
-                reg[.pc] = reg[r1] // JSRR
+                reg[.pc] = reg[instr.r1] // JSRR
             }
         
         case .ld:
-            reg[r0] = mem_read(reg[.pc] &+ pc_offset)
-            update_flags(r0)
+            reg[instr.r0] = mem_read(reg[.pc] &+ instr.pc_offset)
+            update_flags(instr.r0)
         
         case .ldr:
-            reg[r0] = mem_read(reg[r1] &+ offset)
-            update_flags(r0)
+            reg[instr.r0] = mem_read(reg[instr.r1] &+ instr.offset)
+            update_flags(instr.r0)
         
         case .lea:
-            reg[r0] = reg[.pc] &+ pc_offset
-            update_flags(r0)
+            reg[instr.r0] = reg[.pc] &+ instr.pc_offset
+            update_flags(instr.r0)
         
         case .st:
-            mem_write(reg[.pc] &+ pc_offset, reg[r0])
+            mem_write(reg[.pc] &+ instr.pc_offset, reg[instr.r0])
         
         case .sti:
-            mem_write(mem_read(reg[.pc] &+ pc_offset), reg[r0])
+            mem_write(mem_read(reg[.pc] &+ instr.pc_offset), reg[instr.r0])
         
         case .str:
-            mem_write(reg[r1] &+ offset, reg[r0])
+            mem_write(reg[instr.r1] &+ instr.offset, reg[instr.r0])
         
         case .trap:
             handleTrap(instr)
 
         case .ldi:
-            reg[r0] = mem_read(mem_read(reg[.pc] &+ pc_offset))
-            update_flags(r0)
+            reg[instr.r0] = mem_read(mem_read(reg[.pc] &+ instr.pc_offset))
+            update_flags(instr.r0)
             
         case .rti: fallthrough
         case .res:
