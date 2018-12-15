@@ -20,139 +20,139 @@ extension fd_set {
     }
 }
 
-struct Memory {
-    private let storage = UnsafeMutableBufferPointer<UInt16>.allocate(capacity: Int(UInt16.max))
-    
-    private static let KBSR: UInt16 = 0xFE00 // keyboard status
-    private static let KBDR: UInt16 = 0xFE02 // keyboard data
-    
-    subscript(_ idx: UInt16) -> UInt16 {
-        get {
-            func check_key() -> Bool {
-                var readfds = fd_set()
-                readfds.fdZero()
-                readfds.fdSet(fd: STDIN_FILENO)
+struct VM {
+    struct Memory {
+        private let storage = UnsafeMutableBufferPointer<UInt16>.allocate(capacity: Int(UInt16.max))
+        
+        private static let KBSR: UInt16 = 0xFE00 // keyboard status
+        private static let KBDR: UInt16 = 0xFE02 // keyboard data
+        
+        subscript(_ idx: UInt16) -> UInt16 {
+            get {
+                func check_key() -> Bool {
+                    var readfds = fd_set()
+                    readfds.fdZero()
+                    readfds.fdSet(fd: STDIN_FILENO)
+                    
+                    var timeout = timeval(tv_sec: 0, tv_usec: 0)
+                    return select(1, &readfds, nil, nil, &timeout) != 0
+                }
                 
-                var timeout = timeval(tv_sec: 0, tv_usec: 0)
-                return select(1, &readfds, nil, nil, &timeout) != 0
+                if idx == Memory.KBSR {
+                    if check_key() {
+                        storage[Int(Memory.KBSR)] = (1 << 15)
+                        storage[Int(Memory.KBDR)] = UInt16(getchar())
+                    } else {
+                        storage[Int(Memory.KBSR)] = 0
+                    }
+                }
+                
+                return storage[Int(idx)]
             }
             
-            if idx == Memory.KBSR {
-                if check_key() {
-                    storage[Int(Memory.KBSR)] = (1 << 15)
-                    storage[Int(Memory.KBDR)] = UInt16(getchar())
+            set { storage[Int(idx)] = newValue }
+        }
+        
+        func pointerAt(offset: UInt16) -> UnsafeMutablePointer<UInt16> {
+            let rebased = UnsafeMutableBufferPointer(rebasing: storage[Int(offset)...])
+            return rebased.baseAddress!
+        }
+    }
+    
+    struct RegisterSet {
+        enum Register: UInt16, CaseIterable {
+            case r0, r1, r2, r3, r4, r5, r6, r7,
+            pc, cond
+        }
+        
+        let storage = UnsafeMutableBufferPointer<UInt16>.allocate(capacity: Register.allCases.count)
+        
+        subscript(r: Register) -> UInt16 {
+            get {
+                return storage[Int(r.rawValue)]
+            }
+            
+            set {
+                storage[Int(r.rawValue)] = newValue
+            }
+        }
+        
+        static let pos: UInt16 = (1 << 0)
+        static let zro: UInt16 = (1 << 1)
+        static let neg: UInt16 = (1 << 2)
+        
+        subscript(_ rn: UInt16) -> UInt16 {
+            get {
+                return storage[Int(rn)]
+            }
+            
+            set {
+                storage[Int(rn)] = newValue
+                
+                // update flags
+                if newValue == 0 {
+                    self[.cond] = RegisterSet.zro
+                } else if (newValue >> 15) == 1 {
+                    self[.cond] = RegisterSet.neg
                 } else {
-                    storage[Int(Memory.KBSR)] = 0
+                    self[.cond] = RegisterSet.pos
                 }
             }
-
-            return storage[Int(idx)]
+        }
+    }
+    
+    enum OpCode: UInt16 {
+        case br, add, ld, st, jsr, and, ldr, str, rti, not,
+        ldi, sti, jmp, res, lea, trap
+    }
+    
+    enum TrapCode: UInt16 {
+        case getc  = 0x20 // get character from keyboard
+        case out   = 0x21 // output a character
+        case puts  = 0x22 // output a word string
+        case `in`  = 0x23 // input a string
+        case putsp = 0x24 // output a byte string
+        case halt  = 0x25 // halt the program
+    }
+    
+    struct Instruction {
+        let code: UInt16
+        init(_ code: UInt16) {
+            self.code = code
         }
         
-        set { storage[Int(idx)] = newValue }
-    }
-    
-    func pointerAt(offset: UInt16) -> UnsafeMutablePointer<UInt16> {
-        let rebased = UnsafeMutableBufferPointer(rebasing: storage[Int(offset)...])
-        return rebased.baseAddress!
-    }
-}
-
-struct RegisterSet {
-    enum Register: UInt16, CaseIterable {
-        case r0, r1, r2, r3, r4, r5, r6, r7,
-        pc, cond
-    }
-    
-    let storage = UnsafeMutableBufferPointer<UInt16>.allocate(capacity: Register.allCases.count)
-    
-    subscript(r: Register) -> UInt16 {
-        get {
-            return storage[Int(r.rawValue)]
-        }
-        
-        set {
-            storage[Int(r.rawValue)] = newValue
-        }
-    }
-    
-    static let pos: UInt16 = (1 << 0)
-    static let zro: UInt16 = (1 << 1)
-    static let neg: UInt16 = (1 << 2)
-    
-    subscript(_ rn: UInt16) -> UInt16 {
-        get {
-            return storage[Int(rn)]
-        }
-        
-        set {
-            storage[Int(rn)] = newValue
-            
-            // update flags
-            if newValue == 0 {
-                self[.cond] = RegisterSet.zro
-            } else if (newValue >> 15) == 1 {
-                self[.cond] = RegisterSet.neg
+        private static func sign_extend(_ x: UInt16, bit_count: UInt16) -> UInt16 {
+            if ((x >> (bit_count - 1)) & UInt16(1)) != 0 {
+                return x | (0xFFFF << bit_count)
             } else {
-                self[.cond] = RegisterSet.pos
+                return x
             }
         }
+        
+        var op: OpCode? { return OpCode(rawValue: code >> 12) }
+        
+        var trapCode: TrapCode? { return TrapCode(rawValue: code & 0xFF) }
+        
+        var r0: UInt16 { return (code >> 9) & 0x7 }
+        var r1: UInt16 { return (code >> 6) & 0x7 }
+        var imm_flag: Bool { return ((code >> 5) & 0x1) == 1 }
+        var imm5: UInt16 { return Instruction.sign_extend(code & 0x1F, bit_count: 5) }
+        var r2: UInt16 { return code & 0x7 }
+        var pc_offset: UInt16 { return Instruction.sign_extend(code & 0x1ff, bit_count: 9) }
+        var long_pc_offset: UInt16 { return Instruction.sign_extend(code & 0x7ff, bit_count: 11) }
+        var long_flag: Bool { return ((code >> 11) & 1) != 0 }
+        var offset: UInt16 { return Instruction.sign_extend(code & 0x3F, bit_count: 6) }
     }
-}
 
-enum OpCode: UInt16 {
-    case br, add, ld, st, jsr, and, ldr, str, rti, not,
-         ldi, sti, jmp, res, lea, trap
-}
-
-enum TrapCode: UInt16 {
-    case getc  = 0x20 // get character from keyboard
-    case out   = 0x21 // output a character
-    case puts  = 0x22 // output a word string
-    case `in`  = 0x23 // input a string
-    case putsp = 0x24 // output a byte string
-    case halt  = 0x25 // halt the program
-}
-
-struct Instruction {
-    let code: UInt16
-    init(_ code: UInt16) {
-        self.code = code
-    }
+    static let PC_START: UInt16 = 0x3000
     
-    private static func sign_extend(_ x: UInt16, bit_count: UInt16) -> UInt16 {
-        if ((x >> (bit_count - 1)) & UInt16(1)) != 0 {
-            return x | (0xFFFF << bit_count)
-        } else {
-            return x
-        }
-    }
-    
-    var op: OpCode? { return OpCode(rawValue: code >> 12) }
-    
-    var trapCode: TrapCode? { return TrapCode(rawValue: code & 0xFF) }
-    
-    var r0: UInt16 { return (code >> 9) & 0x7 }
-    var r1: UInt16 { return (code >> 6) & 0x7 }
-    var imm_flag: Bool { return ((code >> 5) & 0x1) == 1 }
-    var imm5: UInt16 { return Instruction.sign_extend(code & 0x1F, bit_count: 5) }
-    var r2: UInt16 { return code & 0x7 }
-    var pc_offset: UInt16 { return Instruction.sign_extend(code & 0x1ff, bit_count: 9) }
-    var long_pc_offset: UInt16 { return Instruction.sign_extend(code & 0x7ff, bit_count: 11) }
-    var long_flag: Bool { return ((code >> 11) & 1) != 0 }
-    var offset: UInt16 { return Instruction.sign_extend(code & 0x3F, bit_count: 6) }
-}
-
-let PC_START: UInt16 = 0x3000
-
-struct VM {
     var memory: Memory
     var reg: RegisterSet
     
     init() {
         self.memory = Memory()
         self.reg = RegisterSet()
-        reg[.pc] = PC_START
+        reg[.pc] = VM.PC_START
     }
     
     mutating func run() {
