@@ -290,22 +290,8 @@ struct VM {
     }
 }
 
-// main
-var vm = VM()
-
-if CommandLine.argc < 2 {
-    print("\(CommandLine.arguments[0]) [image-file1] ...")
-    exit(2)
-}
-
-for arg in CommandLine.arguments[1...] {
-    guard vm.read_image(arg) else {
-        fatalError("failed to load image: \(arg)")
-    }
-}
-
+// helpers
 var original_tio = termios()
-
 func disable_input_buffering() {
     tcgetattr(STDIN_FILENO, &original_tio)
     var new_tio = original_tio
@@ -322,10 +308,22 @@ func handle_interrupt(_ signal: Int32) {
     print("")
     exit(-2)
 }
-
 signal(SIGINT, handle_interrupt)
+
+// main
+var vm = VM()
+
+if CommandLine.argc < 2 {
+    print("\(CommandLine.arguments[0]) [image-file1] ...")
+    exit(2)
+}
+
+for arg in CommandLine.arguments[1...] {
+    guard vm.read_image(arg) else {
+        fatalError("failed to load image: \(arg)")
+    }
+}
+
 disable_input_buffering()
-
 vm.run()
-
 restore_input_buffering()
