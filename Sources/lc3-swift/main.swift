@@ -60,9 +60,15 @@ struct Memory {
 
 var memory = Memory()
 
-enum Register: UInt8, CaseIterable {
+enum Register: UInt16, CaseIterable {
     case r0, r1, r2, r3, r4, r5, r6, r7,
          pc, cond
+}
+
+extension UInt16 {
+    static var pos: UInt16 { return (1 << 0) }
+    static var zro: UInt16 { return (1 << 1) }
+    static var neg: UInt16 { return (1 << 2) }
 }
 
 struct RegisterSet {
@@ -85,6 +91,15 @@ struct RegisterSet {
         
         set {
             storage[Int(rn)] = newValue
+            
+            // update flags
+            if newValue == 0 {
+                self[.cond] = .zro
+            } else if (newValue >> 15) == 1 {
+                self[.cond] = .neg
+            } else {
+                self[.cond] = .pos
+            }
         }
     }
 }
@@ -133,22 +148,6 @@ struct Instruction {
 }
 
 var reg = RegisterSet()
-
-extension UInt16 {
-    static var pos: UInt16 { return (1 << 0) }
-    static var zro: UInt16 { return (1 << 1) }
-    static var neg: UInt16 { return (1 << 2) }
-}
-
-func update_flags(_ r: UInt16) {
-    if reg[r] == 0 {
-        reg[.cond] = .zro
-    } else if (reg[r] >> 15) == 1 {
-        reg[.cond] = .neg
-    } else {
-        reg[.cond] = .pos
-    }
-}
 
 let PC_START: UInt16 = 0x3000
 reg[.pc] = PC_START
@@ -208,15 +207,12 @@ func run() {
         switch op {
         case .add:
             reg[instr.r0] = reg[instr.r1] &+ (instr.imm_flag ? instr.imm5 : reg[instr.r2])
-            update_flags(instr.r0)
             
         case .and:
             reg[instr.r0] = reg[instr.r1] & (instr.imm_flag ? instr.imm5 : reg[instr.r2])
-            update_flags(instr.r0)
             
         case .not:
             reg[instr.r0] = ~reg[instr.r1]
-            update_flags(instr.r0)
         
         case .br:
             let cond_flag = instr.r0
@@ -237,15 +233,12 @@ func run() {
         
         case .ld:
             reg[instr.r0] = memory[reg[.pc] &+ instr.pc_offset]
-            update_flags(instr.r0)
         
         case .ldr:
             reg[instr.r0] = memory[reg[instr.r1] &+ instr.offset]
-            update_flags(instr.r0)
         
         case .lea:
             reg[instr.r0] = reg[.pc] &+ instr.pc_offset
-            update_flags(instr.r0)
         
         case .st:
             memory[reg[.pc] &+ instr.pc_offset] = reg[instr.r0]
@@ -261,7 +254,6 @@ func run() {
 
         case .ldi:
             reg[instr.r0] = memory[memory[reg[.pc] &+ instr.pc_offset]]
-            update_flags(instr.r0)
             
         case .rti: fallthrough
         case .res:
