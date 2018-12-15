@@ -20,23 +20,23 @@ extension fd_set {
     }
 }
 
-func check_key() -> Bool {
-    var readfds = fd_set()
-    readfds.fdZero()
-    readfds.fdSet(fd: STDIN_FILENO)
-    
-    var timeout = timeval(tv_sec: 0, tv_usec: 0)
-    return select(1, &readfds, nil, nil, &timeout) != 0
-}
-
 struct Memory {
-    let storage = UnsafeMutableBufferPointer<UInt16>.allocate(capacity: Int(UInt16.max))
+    private let storage = UnsafeMutableBufferPointer<UInt16>.allocate(capacity: Int(UInt16.max))
     
     private static let KBSR: UInt16 = 0xFE00 // keyboard status
     private static let KBDR: UInt16 = 0xFE02 // keyboard data
     
     subscript(_ idx: UInt16) -> UInt16 {
         get {
+            func check_key() -> Bool {
+                var readfds = fd_set()
+                readfds.fdZero()
+                readfds.fdSet(fd: STDIN_FILENO)
+                
+                var timeout = timeval(tv_sec: 0, tv_usec: 0)
+                return select(1, &readfds, nil, nil, &timeout) != 0
+            }
+            
             if idx == Memory.KBSR {
                 if check_key() {
                     storage[Int(Memory.KBSR)] = (1 << 15)
