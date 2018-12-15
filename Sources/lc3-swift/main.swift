@@ -1,6 +1,64 @@
 import Darwin
 
-let memory = UnsafeMutableBufferPointer<UInt16>.allocate(capacity: Int(UInt16.max))
+
+// Ports the FD_ZERO and FD_SET C macros in Darwin to Swift.
+// https://github.com/apple/darwin-xnu/blob/master/bsd/sys/_types/_fd_def.h
+// This is not portable to Linux.
+extension fd_set {
+    // FD_ZERO(self)
+    mutating func fdZero() {
+        bzero(&fds_bits, MemoryLayout.size(ofValue: fds_bits))
+    }
+    
+    // FD_SET(fd, self)
+    mutating func fdSet(fd: Int32) {
+        let __DARWIN_NFDBITS = Int32(MemoryLayout<Int32>.size) * __DARWIN_NBBY
+        let bits = UnsafeMutableBufferPointer(start: &fds_bits.0, count: 32)
+        bits[Int(CUnsignedLong(fd) / CUnsignedLong(__DARWIN_NFDBITS))] |= __int32_t(
+            CUnsignedLong(1) << CUnsignedLong(fd % __DARWIN_NFDBITS)
+        )
+    }
+}
+
+func check_key() -> Bool {
+    var readfds = fd_set()
+    readfds.fdZero()
+    readfds.fdSet(fd: STDIN_FILENO)
+    
+    var timeout = timeval(tv_sec: 0, tv_usec: 0)
+    return select(1, &readfds, nil, nil, &timeout) != 0
+}
+
+struct Memory {
+    let storage = UnsafeMutableBufferPointer<UInt16>.allocate(capacity: Int(UInt16.max))
+    
+    private static let KBSR: UInt16 = 0xFE00 // keyboard status
+    private static let KBDR: UInt16 = 0xFE02 // keyboard data
+    
+    subscript(_ idx: UInt16) -> UInt16 {
+        get {
+            if idx == Memory.KBSR {
+                if check_key() {
+                    storage[Int(Memory.KBSR)] = (1 << 15)
+                    storage[Int(Memory.KBDR)] = UInt16(getchar())
+                } else {
+                    storage[Int(Memory.KBSR)] = 0
+                }
+            }
+
+            return storage[Int(idx)]
+        }
+        
+        set { storage[Int(idx)] = newValue }
+    }
+    
+    func pointerAt(offset: UInt16) -> UnsafeMutablePointer<UInt16> {
+        let rebased = UnsafeMutableBufferPointer(rebasing: storage[Int(offset)...])
+        return rebased.baseAddress!
+    }
+}
+
+var memory = Memory()
 
 enum Register: UInt8, CaseIterable {
     case r0, r1, r2, r3, r4, r5, r6, r7,
@@ -95,74 +153,6 @@ func update_flags(_ r: UInt16) {
 let PC_START: UInt16 = 0x3000
 reg[.pc] = PC_START
 
-func mem_write(_ address: UInt16, _ val: UInt16) {
-    memory[Int(address)] = val
-}
-
-struct MR {
-    static let KBSR: UInt16 = 0xFE00 // keyboard status
-    static let KBDR: UInt16 = 0xFE02 // keyboard data
-}
-
-func mem_read(_ address: UInt16) -> UInt16 {
-    if address == MR.KBSR {
-        if check_key() {
-            memory[Int(MR.KBSR)] = (1 << 15)
-            memory[Int(MR.KBDR)] = UInt16(getchar())
-        } else {
-            memory[Int(MR.KBSR)] = 0
-        }
-    }
-    
-    return memory[Int(address)]
-}
-
-
-// Ports the FD_ZERO and FD_SET C macros in Darwin to Swift.
-// https://github.com/apple/darwin-xnu/blob/master/bsd/sys/_types/_fd_def.h
-// This is not portable to Linux.
-extension fd_set {
-    // FD_ZERO(self)
-    mutating func fdZero() {
-        bzero(&fds_bits, MemoryLayout.size(ofValue: fds_bits))
-    }
-    
-    // FD_SET(fd, self)
-    mutating func fdSet(fd: Int32) {
-        let __DARWIN_NFDBITS = Int32(MemoryLayout<Int32>.size) * __DARWIN_NBBY
-        let bits = UnsafeMutableBufferPointer(start: &fds_bits.0, count: 32)
-        bits[Int(CUnsignedLong(fd) / CUnsignedLong(__DARWIN_NFDBITS))] |= __int32_t(
-            CUnsignedLong(1) << CUnsignedLong(fd % __DARWIN_NFDBITS)
-        )
-    }
-}
-
-/*
-__DARWIN_FD_SET(n, p)    do {
-    int __fd = (n);
-    (fds_bits[(unsigned long)__fd/__DARWIN_NFDBITS] |=
-        (
-            (__int32_t)(
-                (
-                   (unsigned long)1
-                ) << (
-                   (unsigned long)__fd % __DARWIN_NFDBITS
-                )
-            )
-        )
-    );
-} while(0)
-*/
-
-func check_key() -> Bool {
-    var readfds = fd_set()
-    readfds.fdZero()
-    readfds.fdSet(fd: STDIN_FILENO)
-    
-    var timeout = timeval(tv_sec: 0, tv_usec: 0)
-    return select(1, &readfds, nil, nil, &timeout) != 0
-}
-
 func run() {
     var running = true
     
@@ -178,7 +168,7 @@ func run() {
             fflush(stdout)
             
         case .puts:
-            var idx = Int(reg[.r0])
+            var idx = reg[.r0]
             while memory[idx] != 0 {
                 putc(Int32(memory[idx]), stdout)
                 idx += 1
@@ -190,7 +180,7 @@ func run() {
             reg[.r0] = UInt16(getchar())
             
         case .putsp:
-            var idx = Int(reg[.r0])
+            var idx = reg[.r0]
             while memory[idx] != 0 {
                 let char1 = Int32(memory[idx] & 0xFF)
                 putc(char1, stdout)
@@ -209,7 +199,7 @@ func run() {
     
     while running {
         /* FETCH */
-        let instr = Instruction(mem_read(reg[.pc]))
+        let instr = Instruction(memory[reg[.pc]])
         reg[.pc] += 1
         guard let op = instr.op else {
             fatalError("bad opcode")
@@ -246,11 +236,11 @@ func run() {
             }
         
         case .ld:
-            reg[instr.r0] = mem_read(reg[.pc] &+ instr.pc_offset)
+            reg[instr.r0] = memory[reg[.pc] &+ instr.pc_offset]
             update_flags(instr.r0)
         
         case .ldr:
-            reg[instr.r0] = mem_read(reg[instr.r1] &+ instr.offset)
+            reg[instr.r0] = memory[reg[instr.r1] &+ instr.offset]
             update_flags(instr.r0)
         
         case .lea:
@@ -258,19 +248,19 @@ func run() {
             update_flags(instr.r0)
         
         case .st:
-            mem_write(reg[.pc] &+ instr.pc_offset, reg[instr.r0])
+            memory[reg[.pc] &+ instr.pc_offset] = reg[instr.r0]
         
         case .sti:
-            mem_write(mem_read(reg[.pc] &+ instr.pc_offset), reg[instr.r0])
+            memory[memory[reg[.pc] &+ instr.pc_offset]] = reg[instr.r0]
         
         case .str:
-            mem_write(reg[instr.r1] &+ instr.offset, reg[instr.r0])
+            memory[reg[instr.r1] &+ instr.offset] = reg[instr.r0]
         
         case .trap:
             handleTrap(instr)
 
         case .ldi:
-            reg[instr.r0] = mem_read(mem_read(reg[.pc] &+ instr.pc_offset))
+            reg[instr.r0] = memory[memory[reg[.pc] &+ instr.pc_offset]]
             update_flags(instr.r0)
             
         case .rti: fallthrough
@@ -292,11 +282,9 @@ func read_image_file(_ file: UnsafeMutablePointer<FILE>) {
     origin = origin.swap16
     
     let max_read = UInt16.max - origin
-    let rebased = UnsafeMutableBufferPointer(rebasing: memory[Int(origin)...])
-    let read = fread(rebased.baseAddress!, MemoryLayout.size(ofValue: origin), Int(max_read), file)
+    let read = fread(memory.pointerAt(offset: origin), MemoryLayout.size(ofValue: origin), Int(max_read), file)
     
-    for idx in Int(origin)..<Int(origin) + read {
-        //print(memory[idx])
+    for idx in origin..<origin + UInt16(read) {
         memory[idx] = memory[idx].swap16
     }
 }
