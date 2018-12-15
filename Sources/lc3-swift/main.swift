@@ -58,20 +58,12 @@ struct Memory {
     }
 }
 
-var memory = Memory()
-
-enum Register: UInt16, CaseIterable {
-    case r0, r1, r2, r3, r4, r5, r6, r7,
-         pc, cond
-}
-
-extension UInt16 {
-    static var pos: UInt16 { return (1 << 0) }
-    static var zro: UInt16 { return (1 << 1) }
-    static var neg: UInt16 { return (1 << 2) }
-}
-
 struct RegisterSet {
+    enum Register: UInt16, CaseIterable {
+        case r0, r1, r2, r3, r4, r5, r6, r7,
+        pc, cond
+    }
+    
     let storage = UnsafeMutableBufferPointer<UInt16>.allocate(capacity: Register.allCases.count)
     
     subscript(r: Register) -> UInt16 {
@@ -84,6 +76,10 @@ struct RegisterSet {
         }
     }
     
+    static let pos: UInt16 = (1 << 0)
+    static let zro: UInt16 = (1 << 1)
+    static let neg: UInt16 = (1 << 2)
+    
     subscript(_ rn: UInt16) -> UInt16 {
         get {
             return storage[Int(rn)]
@@ -94,11 +90,11 @@ struct RegisterSet {
             
             // update flags
             if newValue == 0 {
-                self[.cond] = .zro
+                self[.cond] = RegisterSet.zro
             } else if (newValue >> 15) == 1 {
-                self[.cond] = .neg
+                self[.cond] = RegisterSet.neg
             } else {
-                self[.cond] = .pos
+                self[.cond] = RegisterSet.pos
             }
         }
     }
@@ -147,155 +143,163 @@ struct Instruction {
     var offset: UInt16 { return Instruction.sign_extend(code & 0x3F, bit_count: 6) }
 }
 
-var reg = RegisterSet()
-
 let PC_START: UInt16 = 0x3000
-reg[.pc] = PC_START
 
-func run() {
-    var running = true
+struct VM {
+    var memory: Memory
+    var reg: RegisterSet
     
-    func handleTrap(_ instr: Instruction) {
-        let trapCode = instr.trapCode!
+    init() {
+        self.memory = Memory()
+        self.reg = RegisterSet()
+        reg[.pc] = PC_START
+    }
+    
+    mutating func run() {
+        var running = true
+
+        func handleTrap(_ instr: Instruction) {
+            let trapCode = instr.trapCode!
+            
+            switch trapCode {
+            case .getc:
+                reg[.r0] = UInt16(getchar())
+                
+            case .out:
+                putc(Int32(reg[.r0]), stdout)
+                fflush(stdout)
+                
+            case .puts:
+                var idx = reg[.r0]
+                while memory[idx] != 0 {
+                    putc(Int32(memory[idx]), stdout)
+                    idx += 1
+                }
+                fflush(stdout)
+                
+            case .in:
+                print("Enter a character: ", terminator: "")
+                reg[.r0] = UInt16(getchar())
+                
+            case .putsp:
+                var idx = reg[.r0]
+                while memory[idx] != 0 {
+                    let char1 = Int32(memory[idx] & 0xFF)
+                    putc(char1, stdout)
+                    let char2 = Int32(memory[idx] >> 8)
+                    if char2 != 0 { putc(char2, stdout) }
+                    idx += 1
+                }
+                fflush(stdout)
+                
+            case .halt:
+                puts("HALT")
+                fflush(stdout)
+                running = false
+            }
+        }
         
-        switch trapCode {
-        case .getc:
-            reg[.r0] = UInt16(getchar())
-            
-        case .out:
-            putc(Int32(reg[.r0]), stdout)
-            fflush(stdout)
-            
-        case .puts:
-            var idx = reg[.r0]
-            while memory[idx] != 0 {
-                putc(Int32(memory[idx]), stdout)
-                idx += 1
+        while running {
+            /* FETCH */
+            let instr = Instruction(memory[reg[.pc]])
+            reg[.pc] += 1
+            guard let op = instr.op else {
+                fatalError("bad opcode")
             }
-            fflush(stdout)
             
-        case .in:
-            print("Enter a character: ", terminator: "")
-            reg[.r0] = UInt16(getchar())
+            switch op {
+            case .add:
+                reg[instr.r0] = reg[instr.r1] &+ (instr.imm_flag ? instr.imm5 : reg[instr.r2])
+                
+            case .and:
+                reg[instr.r0] = reg[instr.r1] & (instr.imm_flag ? instr.imm5 : reg[instr.r2])
+                
+            case .not:
+                reg[instr.r0] = ~reg[instr.r1]
             
-        case .putsp:
-            var idx = reg[.r0]
-            while memory[idx] != 0 {
-                let char1 = Int32(memory[idx] & 0xFF)
-                putc(char1, stdout)
-                let char2 = Int32(memory[idx] >> 8)
-                if char2 != 0 { putc(char2, stdout) }
-                idx += 1
+            case .br:
+                let cond_flag = instr.r0
+                if (cond_flag & reg[.cond]) != 0 {
+                    reg[.pc] &+= instr.pc_offset
+                }
+            
+            case .jmp:
+                reg[.pc] = reg[instr.r1]
+                
+            case .jsr:
+                reg[.r7] = reg[.pc]
+                if instr.long_flag {
+                    reg[.pc] &+= instr.long_pc_offset // JSR
+                } else {
+                    reg[.pc] = reg[instr.r1] // JSRR
+                }
+            
+            case .ld:
+                reg[instr.r0] = memory[reg[.pc] &+ instr.pc_offset]
+            
+            case .ldr:
+                reg[instr.r0] = memory[reg[instr.r1] &+ instr.offset]
+            
+            case .lea:
+                reg[instr.r0] = reg[.pc] &+ instr.pc_offset
+            
+            case .st:
+                memory[reg[.pc] &+ instr.pc_offset] = reg[instr.r0]
+            
+            case .sti:
+                memory[memory[reg[.pc] &+ instr.pc_offset]] = reg[instr.r0]
+            
+            case .str:
+                memory[reg[instr.r1] &+ instr.offset] = reg[instr.r0]
+            
+            case .trap:
+                handleTrap(instr)
+
+            case .ldi:
+                reg[instr.r0] = memory[memory[reg[.pc] &+ instr.pc_offset]]
+                
+            case .rti: fallthrough
+            case .res:
+                fatalError("bad opcode")
             }
-            fflush(stdout)
-            
-        case .halt:
-            puts("HALT")
-            fflush(stdout)
-            running = false
         }
     }
-    
-    while running {
-        /* FETCH */
-        let instr = Instruction(memory[reg[.pc]])
-        reg[.pc] += 1
-        guard let op = instr.op else {
-            fatalError("bad opcode")
+
+    mutating func read_image_file(_ file: UnsafeMutablePointer<FILE>) {
+        func swap16(_ x: UInt16) -> UInt16 {
+            return (x << 8) | (x >> 8)
         }
         
-        switch op {
-        case .add:
-            reg[instr.r0] = reg[instr.r1] &+ (instr.imm_flag ? instr.imm5 : reg[instr.r2])
-            
-        case .and:
-            reg[instr.r0] = reg[instr.r1] & (instr.imm_flag ? instr.imm5 : reg[instr.r2])
-            
-        case .not:
-            reg[instr.r0] = ~reg[instr.r1]
+        var origin: UInt16 = 0
+        fread(&origin, MemoryLayout.size(ofValue: origin), 1, file)
+        origin = swap16(origin)
         
-        case .br:
-            let cond_flag = instr.r0
-            if (cond_flag & reg[.cond]) != 0 {
-                reg[.pc] &+= instr.pc_offset
-            }
+        let max_read = UInt16.max - origin
+        let read = fread(memory.pointerAt(offset: origin), MemoryLayout.size(ofValue: origin), Int(max_read), file)
         
-        case .jmp:
-            reg[.pc] = reg[instr.r1]
-            
-        case .jsr:
-            reg[.r7] = reg[.pc]
-            if instr.long_flag {
-                reg[.pc] &+= instr.long_pc_offset // JSR
-            } else {
-                reg[.pc] = reg[instr.r1] // JSRR
-            }
-        
-        case .ld:
-            reg[instr.r0] = memory[reg[.pc] &+ instr.pc_offset]
-        
-        case .ldr:
-            reg[instr.r0] = memory[reg[instr.r1] &+ instr.offset]
-        
-        case .lea:
-            reg[instr.r0] = reg[.pc] &+ instr.pc_offset
-        
-        case .st:
-            memory[reg[.pc] &+ instr.pc_offset] = reg[instr.r0]
-        
-        case .sti:
-            memory[memory[reg[.pc] &+ instr.pc_offset]] = reg[instr.r0]
-        
-        case .str:
-            memory[reg[instr.r1] &+ instr.offset] = reg[instr.r0]
-        
-        case .trap:
-            handleTrap(instr)
-
-        case .ldi:
-            reg[instr.r0] = memory[memory[reg[.pc] &+ instr.pc_offset]]
-            
-        case .rti: fallthrough
-        case .res:
-            fatalError("bad opcode")
+        for idx in origin..<origin + UInt16(read) {
+            memory[idx] = swap16(memory[idx])
         }
     }
-}
 
-extension UInt16 {
-    var swap16: UInt16 {
-        return (self << 8) | (self >> 8)
+    mutating func read_image(_ image_path: String) -> Bool {
+        guard let file = fopen(image_path, "rb") else { return false }
+        read_image_file(file)
+        fclose(file)
+        return true
     }
-}
-
-func read_image_file(_ file: UnsafeMutablePointer<FILE>) {
-    var origin: UInt16 = 0
-    fread(&origin, MemoryLayout.size(ofValue: origin), 1, file)
-    origin = origin.swap16
-    
-    let max_read = UInt16.max - origin
-    let read = fread(memory.pointerAt(offset: origin), MemoryLayout.size(ofValue: origin), Int(max_read), file)
-    
-    for idx in origin..<origin + UInt16(read) {
-        memory[idx] = memory[idx].swap16
-    }
-}
-
-func read_image(_ image_path: String) -> Bool {
-    guard let file = fopen(image_path, "rb") else { return false }
-    read_image_file(file)
-    fclose(file)
-    return true
 }
 
 // main
+var vm = VM()
+
 if CommandLine.argc < 2 {
     print("\(CommandLine.arguments[0]) [image-file1] ...")
     exit(2)
 }
 
 for arg in CommandLine.arguments[1...] {
-    guard read_image(arg) else {
+    guard vm.read_image(arg) else {
         fatalError("failed to load image: \(arg)")
     }
 }
@@ -322,6 +326,6 @@ func handle_interrupt(_ signal: Int32) {
 signal(SIGINT, handle_interrupt)
 disable_input_buffering()
 
-run()
+vm.run()
 
 restore_input_buffering()
